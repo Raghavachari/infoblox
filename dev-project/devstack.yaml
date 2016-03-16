@@ -1,0 +1,145 @@
+heat_template_version: 2015-10-15
+description: Sets up a basic development machine, enabling access to the users OpenStack project.
+parameters:
+  external_network:
+    type: string
+    description: The external network for floating IP allocations.
+    default: public-138-net
+  username:
+    type: string
+    description: Linux user name for devstack developer
+    default: stack
+  fork_name:
+    type: string
+    description: The GitHub fork to use for Infoblox Heat and Ceilometer
+    default: infobloxopen
+  branch_name:
+    type: string
+    description: The DevStack branch to checkout
+    default: master
+  devstack_url:
+    type: string
+    description: The DevStack repo to clone
+    default: https://git.openstack.org/openstack-dev/devstack
+
+resources:
+  devstack_net:
+    type: OS::Neutron::Net
+    properties:
+      name: devstack-net
+
+  devstack_subnet:
+    type: OS::Neutron::Subnet
+    depends_on: devstack_net
+    properties:
+      name: devstack
+      network: { get_resource: devstack_net }
+      cidr: 10.222.241.0/24
+      dns_nameservers: [172.23.25.240]
+
+  router_devstack:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: dev-router
+      subnet: { get_resource: devstack_subnet }
+
+  mgmt_port:
+    type: OS::Neutron::Port
+    properties:
+      network: { get_resource: devstack_net }
+      port_security_enabled: false
+
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    depends_on: [router_devstack]
+    properties:
+      floating_network: { get_param: external_network }
+      port_id: { get_resource: mgmt_port }
+
+  dev:
+    type: OS::Nova::Server
+    depends_on: [mgmt_port]
+    properties:
+      name: devstack
+      flavor: m1.xlarge
+      image: Ubuntu Trusty 14.04
+      networks: [{port: { get_resource: mgmt_port}}]
+      user_data_format: RAW
+      user_data: {get_attr: [config, config]}
+
+  config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      config:
+        str_replace:
+          template: |
+            #cloud-config
+            ssh_pwauth: true
+            password: infoblox
+            chpasswd: { expire: False }
+
+            write_files:
+              - path: /tmp/local.conf
+                content: |
+                      [[local|localrc]]
+                      ADMIN_PASSWORD=infoblox
+                      DATABASE_PASSWORD=$ADMIN_PASSWORD
+                      RABBIT_PASSWORD=$ADMIN_PASSWORD
+                      SERVICE_PASSWORD=$ADMIN_PASSWORD
+                      SERVICE_TOKEN=767183b0-ac7e-11e4-8fb5-000c29f0f35a
+                      FIXED_RANGE=10.0.0.0/24
+                      FLOATING_RANGE=10.222.241.0/24
+                      Q_FLOATING_ALLOCATION_POOL=start=10.222.241.10,end=10.222.241.254
+                      PUBLIC_NETWORK_GATEWAY=10.222.241.1
+                      PUBLIC_INTERFACE=eth0
+                      Q_USE_PROVIDERNET_FOR_PUBLIC=True
+                      OVS_PHYSICAL_BRIDGE=br-ex
+                      OVS_BRIDGE_MAPPINGS=public:br-ex
+                      HOST_IP=$mgmt_ip
+
+                      LOGFILE=/opt/stack/logs/stack.log
+
+                      disable_service n-net
+                      enable_service neutron q-svc q-agt q-dhcp q-l3 q-meta
+                      enable_service heat h-api h-api-cfn h-api-cw h-eng
+
+                      enable_plugin heat-infoblox https://github.com/$fork_name/heat-infoblox.git $branch_name
+
+                      # take measurements every 30s
+                      CEILOMETER_PIPELINE_INTERVAL=30
+                      # For Kilo and earlier, use these two lines for Ceilometer:
+                      # enable_service ceilometer-acompute ceilometer-acentral ceilometer-anotification ceilometer-collector ceilometer-api
+                      # enable_service ceilometer-alarm-notifier ceilometer-alarm-evaluator
+
+                      # For Liberty and later, use this line for Ceilometer:
+                      enable_plugin ceilometer https://git.openstack.org/openstack/ceilometer.git $branch_name
+
+                      enable_plugin ceilometer-infoblox https://github.com/$fork_name/ceilometer-infoblox.git $branch_name
+
+            runcmd:
+              - apt-get -y --force-yes upgrade
+              - echo infoblox > /tmp/pw
+              - echo infoblox >> /tmp/pw
+              - adduser --gecos "DevStack User" --quiet $username < /tmp/pw
+              - usermod -G sudo $username
+              - echo >> /etc/hosts
+              - echo $mgmt_ip devstack >> /etc/hosts
+              - apt-get -y install git
+              - cd /home/$username
+              - git clone $devstack_url
+              - cd devstack
+              - git checkout $branch_name
+              - cp /tmp/local.conf .
+              - cp -r /home/ubuntu/.ssh /home/$username
+              - chown -R $username:$username /home/$username
+
+          params:
+            $username: {get_param: username}
+            $devstack_url: {get_param: devstack_url}
+            $branch_name: {get_param: branch_name}
+            $fork_name: {get_param: fork_name}
+            $mgmt_ip: {get_attr: [mgmt_port, fixed_ips, 0, ip_address]}
+outputs:
+  floating_ip:
+    description: The publically accessible floating IP of the devstack instance.
+    value: { get_attr: [floating_ip, floating_ip_address] }

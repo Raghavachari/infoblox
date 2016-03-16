@@ -1,0 +1,110 @@
+heat_template_version: 2015-10-15
+description: Builds the network topology and launches the GM for the DNS-VNF demonstration.
+parameters:
+  external_network:
+    type: string
+    description: the external network for floating IP allocations
+    default: public-138-net
+  temp_license:
+    type: string
+    description: comma-delimited list of temp licenses
+    default: vnios,enterprise,dns,dhcp,rpz,cloud
+resources:
+  mgmt_net:
+    type: OS::Neutron::Net
+    properties:
+      name: mgmt-net
+
+  mgmt_subnet:
+    type: OS::Neutron::Subnet
+    depends_on: mgmt_net
+    properties:
+      name: mgmt
+      network: { get_resource: mgmt_net }
+      cidr: 10.250.1.0/24
+      enable_dhcp: false
+
+  lan1_net:
+    type: OS::Neutron::Net
+    properties:
+      name: lan1-net
+
+  lan1_subnet:
+    type: OS::Neutron::Subnet
+    depends_on: lan1_net
+    properties:
+      name: lan1
+      network: { get_resource: lan1_net }
+      cidr: 10.250.2.0/24
+      enable_dhcp: false
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      name: ib-router
+      external_gateway_info:
+        network: { get_param: external_network }
+
+  router_lan1:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: { get_resource: router }
+      subnet: { get_resource: lan1_subnet }
+
+  lan1_port:
+    type: OS::Neutron::Port
+    depends_on: [lan1_net, sg]
+    properties:
+      network: { get_resource: lan1_net }
+      security_groups: [ { get_resource: sg } ]
+
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: external_network }
+      port_id: { get_resource: lan1_port }
+
+  sg:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: Infoblox
+      description: This security group opens the ports needed by Infoblox DDI appliances.
+# for now, just make it wide-open
+      rules: [ {direction: egress}, {direction: ingress} ]
+
+  gm:
+    type: OS::Nova::Server
+    depends_on: [lan1_subnet, mgmt_subnet]
+    properties:
+      name: gm
+      flavor: vnios-1420.160
+      image: nios-7.3.0-314102-160G-1420
+# The mgmt IP is allocated by OpenStack but not configured in the GM. However,
+# we need to list it here since LAN1 needs to be the second NIC
+      networks: [{network: mgmt-net }, {port: { get_resource: lan1_port}} ]
+      metadata: {'infoblox': 'true'}
+      config_drive: true
+      user_data_format: RAW
+      user_data:
+        str_replace:
+          template: |
+            #infoblox-config
+            
+            temp_license: $temp_license
+            remote_console_enabled: true
+            default_admin_password: infoblox
+            lan1:
+              v4_addr: $v4_addr
+              v4_netmask: 255.255.255.0
+              v4_gw: $v4_gw
+          params:
+            $temp_license: { get_param: temp_license }
+            $v4_addr: { get_attr: [lan1_port, fixed_ips, 0, ip_address] }
+            $v4_gw: { get_attr: [lan1_subnet, gateway_ip] }
+outputs:
+  gm_lan1_ip:
+    description: The LAN1 IP address of the GM. Use this as input to the autoscale.yaml stack.
+    value: { get_attr: [lan1_port, fixed_ips, 0, ip_address] }
+  gm_floating_ip:
+    description: The publically accessible floating IP of the GM.
+    value: { get_attr: [floating_ip, floating_ip_address] }

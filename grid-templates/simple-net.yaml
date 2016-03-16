@@ -1,0 +1,70 @@
+heat_template_version: 2015-10-15
+description: Builds a simple network topology and security group for use by generic grids.
+parameters:
+  external_network:
+    type: string
+    description: the external network for floating IP allocations
+    default: public-138-net
+  mgmt_cidr:
+    type: string
+    description: A management network will be created; this is the cidr to use on that network.
+    default: 10.249.249.0/24
+  protocol_cidr:
+    type: string
+    description: A protocol network will be created; this is the cidr to use on that network.
+    default: 10.250.250.0/24
+resources:
+  mgmt_net:
+    type: OS::Neutron::Net
+    properties:
+      name: mgmt-net
+
+  mgmt_subnet:
+    type: OS::Neutron::Subnet
+    depends_on: mgmt_net
+    properties:
+      name: mgmt
+      network: {get_resource: mgmt_net}
+      cidr: {get_param: mgmt_cidr}
+      enable_dhcp: false
+
+  proto_net:
+    type: OS::Neutron::Net
+    properties:
+      name: protocol-net
+
+  proto_subnet:
+    type: OS::Neutron::Subnet
+    depends_on: proto_net
+    properties:
+      name: protocol
+      network: {get_resource: proto_net}
+      cidr: {get_param: protocol_cidr}
+      enable_dhcp: false
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      name: ib-router
+      external_gateway_info:
+        network: { get_param: external_network }
+
+  router_mgmt:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: {get_resource: router}
+      subnet: {get_resource: mgmt_subnet}
+
+  router_protocol:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: {get_resource: router}
+      subnet: {get_resource: proto_subnet}
+
+  sg:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: Infoblox
+      description: This security group opens the ports needed by Infoblox DDI appliances.
+# for now, just make it wide-open
+      rules: [ {direction: egress}, {direction: ingress} ]

@@ -1,0 +1,130 @@
+heat_template_version: 2015-10-15
+description: Sets up a basic development machine, enabling access to the users OpenStack project.
+parameters:
+  external_network:
+    type: string
+    description: the external network for floating IP allocations
+    default: public-138-net
+  username:
+    type: string
+    description: the OpenStack user name
+  project_name:
+    type: string
+    description: the OpenStack project name 
+  os_auth_url:
+    type: string
+    description: the OpenStack auth URL
+
+resources:
+  dev_net:
+    type: OS::Neutron::Net
+    properties:
+      name: dev-net
+
+  dev_subnet:
+    type: OS::Neutron::Subnet
+    depends_on: dev_net
+    properties:
+      name: dev
+      network: { get_resource: dev_net }
+      cidr: 10.222.243.0/24
+      dns_nameservers: [172.23.25.240]
+
+  router:
+    type: OS::Neutron::Router
+    properties:
+      name: dev-router
+      external_gateway_info:
+        network: { get_param: external_network }
+
+  router_dev:
+    type: OS::Neutron::RouterInterface
+    properties:
+      router: { get_resource: router }
+      subnet: { get_resource: dev_subnet }
+
+  dev_port:
+    type: OS::Neutron::Port
+    depends_on: [dev_net, sg]
+    properties:
+      network: { get_resource: dev_net }
+      security_groups: [ { get_resource: sg } ]
+
+  floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: external_network }
+      port_id: { get_resource: dev_port }
+
+  sg:
+    type: OS::Neutron::SecurityGroup
+    properties:
+      name: WideOpen
+      description: Wide Open - No Restrictions
+      rules: [ {direction: egress}, {direction: ingress} ]
+
+  dev:
+    type: OS::Nova::Server
+    depends_on: [dev_subnet]
+    properties:
+      name: control
+      flavor: m1.medium
+      image: Ubuntu Trusty 14.04
+      networks: [{port: { get_resource: dev_port}} ]
+      user_data_format: RAW
+      user_data: {get_attr: [config, config]}
+
+  config:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      config:
+        str_replace:
+          template: |
+            #cloud-config
+            ssh_pwauth: true
+            password: infoblox
+            chpasswd: { expire: False }
+
+            apt_sources:
+              - source: deb http://ubuntu-cloud.archive.canonical.com/ubuntu trusty-updates/liberty main
+
+            write_files:
+              - path: /home/ubuntu/$username-openrc.sh
+                owner: ubuntu:ubuntu
+                permissions: '0755'
+                content: |
+                    export OS_PROJECT_DOMAIN_ID=default
+                    export OS_USER_DOMAIN_ID=default
+                    export OS_PROJECT_NAME=$project_name
+                    export OS_TENANT_NAME=$project_name
+                    export OS_USERNAME=$username
+                    export OS_PASSWORD=infoblox
+                    export OS_AUTH_URL=$os_auth_url
+                    export OS_IDENTITY_API_VERSION=3
+                    export OS_IMAGE_API_VERSION=2
+
+            runcmd:
+              - apt-get -y install ubuntu-cloud-keyring
+              - apt-get update 
+              - apt-get -y --force-yes install python-ceilometerclient python-cinderclient python-glanceclient python-heatclient python-keystoneclient python-neutronclient python-novaclient python-openstackclient python-os-client-config python-swiftclient python-troveclient
+              - apt-get -y --force-yes upgrade
+              - echo infoblox > /tmp/pw
+              - echo infoblox >> /tmp/pw
+              - adduser --gecos $username --quiet $username < /tmp/pw
+              - usermod -G sudo $username
+              - echo >> /etc/hosts
+              - echo $ipaddr control >> /etc/hosts
+              - cp /home/ubuntu/$username-openrc.sh /home/$username
+              - echo source /home/$username/$username-openrc.sh > /home/$username/.bash_aliases
+              - cp -r /home/ubuntu/.ssh /home/$username
+              - chown -R $username:$username /home/$username
+
+          params:
+            $username: {get_param: username}
+            $project_name: {get_param: project_name}
+            $os_auth_url: {get_param: os_auth_url}
+            $ipaddr: { get_attr: [dev_port, fixed_ips, 0, ip_address] }
+outputs:
+  floating_ip:
+    description: The publically accessible floating IP of the GM.
+    value: { get_attr: [floating_ip, floating_ip_address] }
